@@ -244,7 +244,8 @@ std::unique_ptr<Socket, decltype(deletor)> spSocket(new Socket(), deletor);
   - 注意循环引用问题，一个资源的生命周期可以交给一个智能指针对象管理，但是该智能指针的生命周期不可以在交给该资源管理。
 
 ```C++
-//在实际开发中有时需要在类中包裹返回当前对象的一个shared_ptr给外部使用，有此要求的类只需要继承自std::enable_shared_from_this<T>模版对象即可
+//在实际开发中有时需要在类中包裹返回当前对象的一个shared_ptr给外部使用，
+//有此要求的类只需要继承自std::enable_shared_from_this<T>模版对象即可
 #include<memory>
 class A:public std::enbale_shared_from_this<A>{
 public:
@@ -374,7 +375,8 @@ std::shared_ptr<int> s = sp2.lock();
 **Linux平台**
 ```C
 #include <pthread.h>
-//thread为输出参数，可以得到线程id；attr指定线程属性，NULL表示使用默认属性；
+//thread为输出参数，可以得到线程id；
+//attr指定线程属性，NULL表示使用默认属性；
 //start_routine指定线程函数，调用方式必须是_cdecl，这是在C/C++中定义全局函数时默认的调用方式
 //arg用于在创建线程是将某个参数传入线程函数中
 //成功返回0，失败返回错误码
@@ -436,3 +438,447 @@ HANDLE CreateThread(
   LPDWORD lpThreadId                         // pointer to receive thread ID
 );
 ```
+
+例子：
+```C
+#include<Windows.h>
+#include<stdio.h>
+
+DWORD WINAPI ThreadProc(LPVOID lpParameters){
+    while(TRUE){
+        Sleep(1000);
+        printf("I am child thread\n");
+    }
+    return 0;
+}
+
+int main()
+{
+    DWORD dwThreadId;
+    HANDLE hThread = CreateThread(NULL, 0, ThreadProc, NULL, 0, &dwThreadId);
+    if(hThread == NULL){
+        printf("Failed to CreateThread.\n");
+        return -1;
+    }
+
+    while(1){}
+    return 0;
+}
+```
+
+在实际开发中推荐使用CRT提供的线程创建函数：_beginthreadex，位于process.h头文件。
+```C
+uintptr_t _beginthreadex( // NATIVE CODE
+   void *security,
+   unsigned stack_size,
+   unsigned ( __stdcall *start_address )( void * ),
+   void *arglist,
+   unsigned initflag,
+   unsigned *thrdaddr
+);
+```
+
+**C++11提供的std::thread类**
+C++11新标准引入了std::thread(头文件thread)，使用这个类可以将任意签名形式的函数作为线程函数。std::thread对象在线程函数运行期间必须是有效的，也可以通过detach方法让线程与线程对象脱离关系(**不推荐这么做**)。
+
+### 3.2.2 获取线程id
+
+获取当前线程id：
+- phtread_t pthread_self();     //Linux
+- DWORD GetCurrentThreadId();   //win
+- std::this_thread.get_id();    //C++11
+
+查看一个进程的线程数量：
+- pstack pid    //Linux，程序必须有调试符号
+- 任务管理器    //win
+- syscall(SYS_gettid)   //Linux,系统调用
+
+### 3.2.3 等待线程结束
+
+**Linux**
+- int pthread_join(pthread_t thread, void **retval);
+
+```C++
+#include<stdio.h>
+#include<string.h>
+#include<pthread.h>
+
+#define TIME_FILENAME "time.txt"
+
+void* fileThreadFunc(void* arg)
+{
+  time_t now = time(NULL);
+  struct tm* t = localtime(&now);
+  char timeStr[32] = {0};
+  snprintf(timeStr, 32, "%04d/%02d/%02d %02d:%02d:%02d",
+      t->tm_year+1900,
+      t->tm_mon+1,
+      t->tm_mday,
+      t->tm_hour,
+      t->tm_min,
+      t->tm_sec);
+  FILE* fp = fopen(TIME_FILENAME, "w");
+  if(fp == NULL)
+  {
+    printf("Failed to create time.txt.\n");
+    return NULL;
+  }
+  size_t sizeToWrite = strlen(timeStr)+1;
+  size_t ret = fwrite(timeStr, 1, sizeToWrite, fp);
+  if(ret != sizeToWrite)
+    printf("Wirte file error.\n");
+  fclose(fp);
+  return NULL;
+}
+
+int main()
+{
+  pthread_t fileThreadID;
+  int ret = pthread_create(&fileThreadID, NULL, fileThreadFunc, NULL);
+  if(ret != 0)
+  {
+    printf("Failed to create fileThread.\n");
+    return -1;
+  }
+  int* retval;
+  pthread_join(fileThreadID, (void**) &retval);
+  FILE* fp = fopen(TIME_FILENAME, "r");
+  if( fp == NULL)
+  {
+    printf("open file error.\n");
+    return -2;
+  }
+  char buf[32] = {0};
+  int sizeRead = fread(buf, 1, 32, fp);
+  if(sizeRead == 0)
+  {
+    printf("Read file error.\n");
+    fclose(fp);
+    return -3;
+  }
+  printf("Current Time is: %s.\n", buf);
+  fclose(fp);
+  return 0;
+}
+```
+
+**windows**
+- WaitForSingleObject
+- WaitForMultipleObjects
+
+```C++
+#include <stdio.h>
+#include <string.h>
+#include <time.h>
+#include <Windows.h>
+
+#define TIME_FILENAME "time.txt"
+
+DWORD WINAPI FileThreadFunc(LPVOID lpParameters)
+{
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char timeStr[32] = {0};
+    snprintf(timeStr, 32, "%04d/%02d/%02d %02d:%02d:%02d",
+             t->tm_year + 1900,
+             t->tm_mon + 1,
+             t->tm_mday,
+             t->tm_hour,
+             t->tm_min,
+             t->tm_sec);
+    FILE *fp = fopen(TIME_FILENAME, "w");
+    if (fp == NULL)
+    {
+        printf("Failed to create time.txt.\n");
+        return NULL;
+    }
+    size_t sizeToWrite = strlen(timeStr) + 1;
+    size_t ret = fwrite(timeStr, 1, sizeToWrite, fp);
+    if (ret != sizeToWrite)
+        printf("Wirte file error.\n");
+    fclose(fp);
+    return NULL;
+}
+
+int main()
+{
+    DWORD dwFileThreadID;
+    HANDLE hFileThread = CreateThread(NULL, 0, FileThreadFunc, NULL, 0, 
+    &dwFileThreadID);
+    if (hFileThread == NULL)
+    {
+        printf("Failed to create fileThread.\n");
+        return -1;
+    }
+    WaitForSingleObject(hFileThread, INFINITE);
+    
+    FILE *fp = fopen(TIME_FILENAME, "r");
+    if (fp == NULL)
+    {
+        printf("open file error.\n");
+        return -2;
+    }
+    char buf[32] = {0};
+    int sizeRead = fread(buf, 1, 32, fp);
+    if (sizeRead == 0)
+    {
+        printf("Read file error.\n");
+        fclose(fp);
+        return -3;
+    }
+    printf("Current Time is: %s.\n", buf);
+    fclose(fp);
+    return 0;
+}
+```
+
+**C++11的线程等待函数**
+- std::thread的join方法，目标线程必须是可join的，可以通过joinable方法判断
+
+```C++
+#include<stdio.h>
+#include<string.h>
+#include<time.h>
+#include<thread>
+
+#define TIME_FILENAME "time.txt"
+
+void fileThreadFunc()
+{
+  time_t now = time(NULL);
+  struct tm* t = localtime(&now);
+  char timeStr[32] = {0};
+  snprintf(timeStr, 32, "%04d/%02d/%02d %02d:%02d:%02d",
+      t->tm_year+1900,
+      t->tm_mon+1,
+      t->tm_mday,
+      t->tm_hour,
+      t->tm_min,
+      t->tm_sec);
+  FILE* fp = fopen(TIME_FILENAME, "w");
+  if(fp == NULL)
+  {
+    printf("Failed to create time.txt.\n");
+    return;
+  }
+  size_t sizeToWrite = strlen(timeStr)+1;
+  size_t ret = fwrite(timeStr, 1, sizeToWrite, fp);
+  if(ret != sizeToWrite)
+    printf("Wirte file error.\n");
+  fclose(fp);
+  return;
+}
+
+int main()
+{
+  std::thread t(fileThreadFunc);
+  if(t.joinable())
+  {
+    t.join();
+  }
+  
+  FILE* fp = fopen(TIME_FILENAME, "r");
+  if( fp == NULL)
+  {
+    printf("open file error.\n");
+    return -2;
+  }
+  char buf[32] = {0};
+  int sizeRead = fread(buf, 1, 32, fp);
+  if(sizeRead == 0)
+  {
+    printf("Read file error.\n");
+    fclose(fp);
+    return -3;
+  }
+  printf("Current Time is: %s.\n", buf);
+  fclose(fp);
+  return 0;
+}
+```
+
+> 如果使用C++面向对象的方法对线程函数进行封装，线程函数就不能是类的实例方法，只能是静态方法，因为线程函数签名必须是指定格式，对于类实例方法，在翻译时编译器会将对象地址作为第一个参数传递给方法，因此编译后的方法签名就不符合指定格式了。
+> 如果使用静态方法，就无法访问类的实例方法了，为了解决这个问题，通常会在创建线程时将当前对象的地址（this指针）传递给线程函数，然后在线程函数中将该指针转换为原来的类实例，再通过这个实例访问类的所有方法。
+
+## 3.4 整型变量的原子操作
+
+### 3.4.1 不是原子类型的整形变量操作
+- 给整形变量赋值：int a = 1;[编译器优化策略]
+- 自增/自减：a++;--a; [3条汇编]
+- 将一个变量赋值给另一个变量：int b = a;  [2条汇编]
+
+### 3.4.2 windows对整型变量的原子操作
+Interlocked系列函数（部分）：
+```C++
+LONG InterlockedAdd(
+	LONG volatile *Addend,
+	LONG          Value
+);
+LONG InterlockedIncrement(
+	LONG volatile *Addend
+);
+LONG InterlockedAnd(
+	LONG volatile *Destination,
+	LONG          Value
+);
+LONG InterlockedExchangeAdd(
+	LONG volatile *Addend,
+	LONG          Value
+);
+LONG InterlockedExchange(
+	LONG volatile *Target,
+	LONG 		  Value
+);
+LONG InterlockedCompareExchange(
+	LONG volatile *Destination,
+	LONG          ExChange,
+	LONG          Comperand
+);
+```
+
+### 3.4.3 C++11对整型变量原子操作的支持
+
+**std::atomic**，这是一个模板类型，可以传入具体整型（bool, char, short, int, uint等）https://en.cppreference.com/w/cpp/atomic/atomic
+```C++
+#include<atomic>
+#include<stdio.h>
+
+int main()
+{
+  std::atomic<int> value;
+  value = 99;
+  printf("%d\n", (int)value);
+
+  value++;
+  printf("%d\n", (int)value);
+  return 0;
+}
+```
+
+## 3.5 Linux线程同步对象
+
+### 3.5.1 Linux互斥体
+http://www.cs.kent.edu/~ruttan/sysprog/lectures/multi-thread/pthread_mutex_init.html
+```C++
+#include <pthread.h>
+pthread_mutex_t fastmutex = PTHREAD_MUTEX_INITIALIZER;
+
+pthread_mutex_t recmutex = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+
+pthread_mutex_t errchkmutex = PTHREAD_ERRORCHECK_MUTEX_INITIALIZER_NP;
+
+int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *mutexattr);
+
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+
+int pthread_mutex_trylock(pthread_mutex_t *mutex);
+
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+
+int pthread_mutex_destroy(pthread_mutex_t *mutex);
+```
+- 无需销毁用PTHREAD_MUTEX_INITIALIZER初始化的互斥体
+- 不要销毁一个已经加锁或正在被条件变量使用的互斥体对象
+
+```C++
+  int pthread_mutexattr_init(pthread_mutexattr_t *attr);
+  int pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
+  int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type);
+  int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type);
+```
+type类型：
+- PTHREAD_MUTEX_NORMAL(普通锁)，默认属性，加锁后其他线程会阻塞在lock处。一个线程如果对一个已经加锁的普通锁再次使用lock，则会阻塞在第二次调用lock代码处。
+- PTHREAD_MUTEX_ERRORCHECK(检错锁)，如果一个线程使用lock对已经加锁的互斥体对象再次加锁，则会返回EDEADLK。不影响其他线程调用后阻塞。
+- PTHREAD_MUTEX_RECURSIVE(可重入锁)。
+
+### 3.5.2 信号量
+
+```C++
+#include <semaphore.h>
+
+//pshared=0表示只能在同一个进程之间共享，非0表示可以在多个进程间共享
+//value用于设置信号量初始状态下的资源数量
+int sem_init(sem_t *sem, int pshared, unsigned int value);
+int sem_destory(sem_t *sem);
+
+//将信号量的资源计数加1，并解锁该信号量对象，会唤醒阻塞的其他线程
+int sem_post(sem_t *sem);
+int sem_wait(sem_t *sem);
+int sem_trywait(sem_t *sem);
+int sem_timedwait(sem_t *sem， const struct timespec* abs_timeout);
+```
+
+### 3.5.3 Linux条件变量
+pthread_cond_t
+```C++
+#include <pthread.h>
+pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+int pthread_cond_init(pthread_cond_t *cond, pthread_condattr_t *cond_attr);
+
+int pthread_cond_signal(pthread_cond_t *cond);
+
+int pthread_cond_broadcast(pthread_cond_t *cond);
+
+int pthread_cond_wait(pthread_cond_t *cond, pthread_mutex_t *mutex);
+
+int pthread_cond_timedwait(pthread_cond_t *cond, pthread_mutex_t *mutex, const struct timespec *abstime);
+
+int pthread_cond_destroy(pthread_cond_t *cond);
+```
+
+- pthread_cond_wait在阻塞时，会释放其绑定的互斥体并阻塞线程。**因此在调用前需要对互斥体进行加锁**
+- pthread_cond_wait在收到信号时，会返回并对其绑定的互斥体进行加锁，**因此在调用后需要对互斥体进行解锁。**
+
+**虚假唤醒**，条件变量唤醒之后再次测试条件是否满足就可以解决虚假唤醒问题。因此使用while循环而不是if。
+
+> 如果一个条件变量信号在产生时，没有相关线程调用pthread_cond_wait捕获该信号，那么该信号就会永久丢失，再次调用pthread_cond_wait就用导致永久阻塞。**要确保在发送条件信号之前调用pthread_cond_wait。**
+
+### 3.5.4 Linux读写锁
+读锁共享，写锁独占。
+
+```C++
+#include <pthread.h>
+int pthread_rwlock_init(pthread_rwlock_t * restrict lock,
+    const pthread_rwlockattr_t * restrict attr);
+
+pthread_rwlock_t lock = PTHREAD_RWLOCK_INITIALIZER;
+
+int pthread_rwlock_destroy(pthread_rwlock_t *lock);
+
+int pthread_rwlock_rdlock(pthread_rwlock_t *lock);
+
+int pthread_rwlock_timedrdlock(pthread_rwlock_t * restrict lock,
+    const struct timespec * restrict abstime);
+
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *lock);
+
+int pthread_rwlock_wrlock(pthread_rwlock_t *lock);
+
+int pthread_rwlock_timedwrlock(pthread_rwlock_t * restrict lock,
+    const struct timespec * restrict abstime);
+
+int pthread_rwlock_trywrlock(pthread_rwlock_t *lock);
+
+int pthread_rwlock_unlock(pthread_rwlock_t *lock);
+```
+
+读写锁的属性：
+```C++
+//pthread_rwlockattr_t
+enum
+{
+  PTHREAD_RWLOCK_PREFER_READER_NP,  //读者优先
+  PTHREAD_RWLOCK_PREFER_WRITER_NP,  //读者优先
+  PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP, //写者优先
+  PTHREAD_RWLOCK_DEFAULT_NP = PTHREAD_RWLOCK_PREFER_READER_NP
+};
+int pthread_rwlockattr_setkind_np(pthread_rwlockattr_t *attr,
+                      int pref);
+int pthread_rwlockattr_getkind_np(
+                      const pthread_rwlockattr_t *restrict attr,
+                      int *restrict pref);
+```
+
+## 3.6 windows线程同步对象
+
