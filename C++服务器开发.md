@@ -880,5 +880,1111 @@ int pthread_rwlockattr_getkind_np(
                       int *restrict pref);
 ```
 
-## 3.6 windows线程同步对象
+## 3.6 [windows线程同步对象](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/)
+等待单个对象：
+```C++
+DWORD WaitForSingleObject(HANDLE hHandle, DWORD dwMilliseconds);
+```
+hHandle可能的类型：
+- 线程：等待线程结束
+- 进程：等待进程结束
+- Event(事件):等待Event有信号
+- Mutex(互斥体):等待Mutex释放，成功后持有该Mutex
+- Semaphore(信号量):等待该Semaphore对象有信号
+
+返回值：
+- WAIT_FAILED
+- WAIT_OBJECT_0
+- WAIT_TIMEOUT
+- WAIT_ABANDONED:该mutex处于废弃状态
+
+等待多个对象：
+```C++
+DWORD WaitForMultipleObjects(
+  DWORD nCount,
+  const HANDLE *lpHandles,
+  BOOL bWaitAll,
+  DOWRD dwMilliseconds
+);
+```
+
+### 3.6.2 Windows临界区对象CriticalSection
+
+临界区的代码在某一时刻只允许一个线程执行。
+
+- InitializeCriticalSection
+- InitializeCriticalSectionAndSpinCount:多加了自旋
+- EnterCriticalSection
+- TryEnterCriticalSection
+- LeaveCriticalSection
+- DeleteCriticalSection
+
+位于EnterCriticalSection和LeaveCriticalSection之间的代码即临界区代码。TryEnterCriticalSection会尝试进入临界区，如果进入不了不会阻塞线程，而是立即返回False。
+
+```C++
+#include <Windows.h>
+#include <list>
+#include <iostream>
+#include <string>
+
+
+CRITICAL_SECTION g_cs;
+int              g_number = 0;
+
+DWORD __stdcall WOrkerThreadProc(LPVOID lpThreadParameter)
+{
+    DWORD dwThreadId = GetCurrentThreadId();
+    while (true)
+    {
+        EnterCriticalSection(&g_cs);
+        std::cout << "EnterCriticalSection, ThreadId:" << dwThreadId << std::endl;
+        g_number++;
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        char szMsg[64] = {0};
+        sprintf(szMsg,
+        "[%04d-%02d-%02d %02d:%02d:%02d:%03d]NO.%d, ThreadId:%d.",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+        g_number, dwThreadId);
+        std::cout << szMsg << std::endl;
+        std::cout << "Leave critical section, ThreadId:"
+        << dwThreadId << std::endl;
+        LeaveCriticalSection(&g_cs);
+        Sleep(1000);
+    }
+    
+}
+
+int main()
+{
+    InitializeCriticalSection(&g_cs);
+    HANDLE hWorkerThread1 = CreateThread(NULL, 0, WOrkerThreadProc, NULL, 0, NULL);
+    HANDLE hWorkerThread2 = CreateThread(NULL, 0, WOrkerThreadProc, NULL, 0, NULL);
+
+    WaitForSingleObject(hWorkerThread1, INFINITE);
+    WaitForSingleObject(hWorkerThread2, INFINITE);
+
+    CloseHandle(hWorkerThread1);
+    CloseHandle(hWorkerThread2);
+
+    DeleteCriticalSection(&g_cs);
+    return 0;
+}
+```
+
+封装CriticalSection:
+```C++
+class CCriticalSection
+{
+  public:
+  CCriticalSection(CRITICAL_SECTION& cs): m_CS(cs)
+  {
+    EnterCriticalSection(&m_CS);
+  }
+  ~CCriticalSection()
+  {
+    LeaveCriticalSection(&m_CS);
+  }
+
+private:
+  CRITICAL_SECTION& m_CS;
+}
+```
+
+### 3.6.3 WindowsEvent对象
+
+```C++
+HANDLE CreateEventA(
+  [in, optional] LPSECURITY_ATTRIBUTES lpEventAttributes,
+  [in]           BOOL                  bManualReset,
+  [in]           BOOL                  bInitialState,
+  [in, optional] LPCSTR                lpName
+);
+```
+- lpEventAttributes设置Event对象安全性，一般为NULL
+- bManualReset，设置Event对象受信行为，当设置为Ture时需要手动调用ResetEvent重置为无信号状态
+- bInitialState：Event初始状态是否受信
+- lpName,可以设置Event对象名称，也可以为NULl，Event对象可以通过名称在不同的进程之间共享。
+- 成功返回对象句柄，失败返回NULL
+
+```C++
+#include<Windows.h>
+#include<string>
+#include<iostream>
+
+bool        g_bTaskCompleted = false;
+std::string g_TaskResult;
+HANDLE      g_hTaskEvent = NULL;
+
+DWORD __stdcall WorkerThreadProc(LPVOID lpThreadParameter)
+{
+    Sleep(3000);
+    g_TaskResult = "Task completed";
+    g_bTaskCompleted = true;
+    SetEvent(g_hTaskEvent);
+    return 0;
+}
+
+int main()
+{
+    g_hTaskEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    HANDLE hWorkerThread = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, NULL);
+    DWORD dwResult = WaitForSingleObject(g_hTaskEvent, INFINITE);
+    if(dwResult == WAIT_OBJECT_0)
+        std::cout << g_TaskResult << std::endl;
+    CloseHandle(hWorkerThread);
+    CloseHandle(g_hTaskEvent);
+    return 0;
+}
+```
+
+> 手动重置的Event对象一旦变成受信状态，其信号就不会丢失。而条件变量则可能丢失信号。
+
+### 3.6.4 [Windows Mutex对象](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexa)
+```C++
+HANDLE CreateMutexA(
+  [in, optional] LPSECURITY_ATTRIBUTES lpMutexAttributes,
+  [in]           BOOL                  bInitialOwner,
+  [in, optional] LPCSTR                lpName
+);
+```
+- lpMutexAttributes设置Mutex对象安全性，一般为NULL
+- bInitialOwner设置调用者的线程是否立即拥有该对象
+- lpName,可以设置Mutex对象名称，也可以为NULl，Mutex对象可以通过名称在不同的进程之间共享。
+
+```C++
+#include<Windows.h>
+#include<string>
+#include<iostream>
+
+int         g_iResource = 0;
+HANDLE      g_hMutex = NULL;
+
+DWORD __stdcall WorkerThreadProc(LPVOID lpThreadParameter)
+{
+    DWORD dwThreadId = GetCurrentThreadId();
+    while(true)
+    {
+        if(WaitForSingleObject(g_hMutex, 1000) == WAIT_OBJECT_0)
+        {
+            g_iResource++;
+            std::cout << "Thread:" << dwThreadId << "becomes mutex owner,ResourceNo:" 
+            << g_iResource << std::endl;
+            ReleaseMutex(g_hMutex);
+        }   
+        Sleep(1000);
+    }
+    return 0;
+}
+
+int main()
+{
+    g_hMutex = CreateMutex(NULL, false, NULL);
+    HANDLE hWorkerThreads[5];
+    for(int i = 0; i < 5; ++i)
+    {
+        hWorkerThreads[i] = CreateThread(NULL, 0, WorkerThreadProc, NULL, 0, NULL);
+    }
+    for(int i = 0; i < 5; ++i)
+    {
+        WaitForSingleObject(hWorkerThreads[i], INFINITE);
+        CloseHandle(hWorkerThreads[i]);
+    }
+    CloseHandle(g_hMutex);
+    return 0;
+}
+```
+
+### 3.6.5 [Windows Semaphore对象](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createsemaphoreexw)
+Semaphore能够精确控制同时唤醒指定数量的线程。
+```C++
+HANDLE CreateSemaphoreW(
+  [in, optional] LPSECURITY_ATTRIBUTES lpSemaphoreAttributes,
+  [in]           LONG                  lInitialCount,
+  [in]           LONG                  lMaximumCount,
+  [in, optional] LPCWSTR               lpName
+);
+```
+
+```C++
+#include<Windows.h>
+#include<iostream>
+#include<time.h>
+#include<list>
+#include<string>
+
+HANDLE                  g_hMsgSemaphore = NULL;
+std::list<std::string>  g_listChatMsg;
+CRITICAL_SECTION        g_csMsg;
+
+DWORD __stdcall NetThreadProc(LPVOID lpThreadParam)
+{
+    int nMsgIndex = 0;
+    while(true)
+    {
+        EnterCriticalSection(&g_csMsg);
+        int count = rand() % 4 + 1;
+        for(int i = 0; i < count; ++i)
+        {
+            nMsgIndex++;
+            SYSTEMTIME st;
+            GetLocalTime(&st);
+            char szMsg[64] = {0};
+            sprintf(szMsg,
+            "[%04d-%02d-%02d %02d:%02d:%02d:%03d] A new Msg, No.%d.",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+            nMsgIndex);
+            g_listChatMsg.emplace_back(szMsg);
+        }
+        LeaveCriticalSection(&g_csMsg);
+        ReleaseSemaphore(g_hMsgSemaphore, count, NULL);
+    }
+    return 0;
+}
+
+DWORD __stdcall ParseThreadProc(LPVOID lpThreadParam)
+{
+    DWORD dwThreadId = GetCurrentThreadId();
+    std::string current;
+    while(true)
+    {
+        if(WaitForSingleObject(g_hMsgSemaphore, INFINITE) == WAIT_OBJECT_0)
+        {
+            EnterCriticalSection(&g_csMsg);
+            if(!g_listChatMsg.empty())
+            {
+                current = g_listChatMsg.front();
+                g_listChatMsg.pop_front();
+                std::cout << "Thread:" << dwThreadId << " Parse msg: " << 
+                current << std::endl;
+            }
+            LeaveCriticalSection(&g_csMsg);
+        }
+    }
+    return 0;
+}
+
+int main()
+{
+    srand(time(NULL));
+    InitializeCriticalSection(&g_csMsg);
+
+    g_hMsgSemaphore = CreateSemaphore(NULL, 0, INT_MAX, NULL);
+
+    HANDLE hNetThread = CreateThread(NULL, 0, NetThreadProc, NULL, 0, NULL);
+    HANDLE hWorkerThreads[4];
+    for(int i = 0; i < 4; ++i)
+    {
+        hWorkerThreads[i] = CreateThread(NULL, 0, ParseThreadProc, NULL, 0, NULL);
+    }
+    for(int i = 0;i < 4; ++i)
+    {
+        WaitForSingleObject(hWorkerThreads[i], INFINITE);
+        CloseHandle(hWorkerThreads[i]);
+    }
+    WaitForSingleObject(hNetThread, INFINITE);
+    CloseHandle(hNetThread);
+
+    CloseHandle(g_hMsgSemaphore);
+
+    DeleteCriticalSection(&g_csMsg);
+    return 0;
+}
+```
+
+### 3.6.6 [Windows读写锁](https://learn.microsoft.com/en-us/windows/win32/sync/slim-reader-writer--srw--locks)
+
+- InitializeSRWLock:Initialize an SRW lock.
+- AcquireSRWLockShared:以共享方式获得读写锁
+- ReleaseSRWLockShared:释放共享读写锁
+- AcquireSRWLockExclusive：获得排他读写锁
+- ReleaseSRWLockExclusive：释放排他读写锁
+
+不需要显示销毁一个读写锁。
+
+### 3.6.7 [Windows条件变量](https://learn.microsoft.com/en-us/windows/win32/sync/condition-variables)
+
+在XP版本以后支持，user-mode对象，不支持跨进程共享。使用时需要配合一个临界区或读写锁，在调用SleepCondition相关函数前，调用线程必须持有对应临界区或读写锁对象。
+
+- InitializeConditionVariable：Initializes a condition variable.
+- SleepConditionVariableCS：Sleeps on the specified condition variable and releases the specified critical section as an atomic operation.
+- SleepConditionVariableSRW：Sleeps on the specified condition variable and releases the specified SRW lock as an atomic operation.
+- WakeAllConditionVariable：Wakes all threads waiting on the specified condition variable.
+- WakeConditionVariable：Wakes a single thread waiting on the specified condition variable.
+
+```C++
+CRITICAL_SECTION CritSection;
+CONDITION_VARIABLE ConditionVar;
+
+void PerformOperationOnSharedData()
+{ 
+   EnterCriticalSection(&CritSection);
+
+   // Wait until the predicate is TRUE
+
+   while( TestPredicate() == FALSE )
+   {
+      //线程无限等待，直到资源可用，由于可能存在操作系统虚假唤醒，所有在其外
+      //加了一个用于判断资源是否可用的循环
+      SleepConditionVariableCS(&ConditionVar, &CritSection, INFINITE);
+   }
+
+   // The data can be changed safely because we own the critical 
+   // section and the predicate is TRUE
+
+   ChangeSharedData();
+
+   LeaveCriticalSection(&CritSection);
+
+   // If necessary, signal the condition variable by calling
+   // WakeConditionVariable or WakeAllConditionVariable so other
+   // threads can wake
+}
+```
+
+### 3.6.8 在多进程间共享线程同步对象
+
+> Windows Event, Mutex, Semaphore对象在创建时指定名称后就可以在不同的进程之间共享。以下用CreateMutex来说明：
+> 
+> If the function succeeds, the return value is a handle to the newly created mutex object.
+> If the function fails, the return value is NULL. To get extended error information, call GetLastError.
+> 
+> **If the mutex is a named mutex and the object existed before this function call, the return value is a handle to the existing object, and the GetLastError function returns ERROR_ALREADY_EXISTS.**
+
+## 3.7 C++11/14/17线程同步对象
+
+C++11标准中新增了用于线程同步的std::mutex和std::condition_variable。
+
+- mutex:C++11,基本的互斥量
+- timed_mutex:C++11,超时机制互斥量
+- recursive_mutex:C++11，可重入的互斥量
+- recursive_timed_mutex:C++11
+- shared_timed_mutex:C++14
+- shared_mutex:C++17
+
+并且提供了如下封装：
+
+- lock_gurad:C++11，基于作用域的互斥量管理
+- unique_lock:C++11,更加灵活的互斥量管理
+- shared_lock:C++14，共享互斥量管理
+- scoped_lock:C++17,多互斥量避免死锁管理
+
+**要避免同一个线程对一个互斥量多次加锁，如果确实需要，则应该使用recursive_mutex，并且加锁多少次就需要解锁多少次。** std::mutex和std::shared_mutex分别对应Java中的ReentrantLock和ReentrantReadWriteLock。
+
+C++11还提供了std::condition_variable来表示条件变量，使用时需要绑定一个std::unique_lock或std::lock_guard对象，并且不需要显示的初始化和销毁。
+
+```C++
+#include<thread>
+#include<mutex>
+#include<condition_variable>
+#include<list>
+#include<iostream>
+
+class Task
+{
+public:
+    Task(int taskId)
+    {
+        this->taskId = taskId;
+    };
+    void doTask()
+    {
+        std::cout << "handle a task, taskId: " << taskId << ", ThreadId:"
+        << std::this_thread::get_id() << std::endl;
+    }
+
+private:
+    int taskId;
+};
+
+std::mutex      mymutex;
+std::list<Task*> tasks;
+
+std::condition_variable myCv;
+
+void* consumer_thread()
+{
+    Task* pTask = NULL;
+    while(true)
+    {
+        //减小guard锁范围
+        {
+            std::unique_lock<std::mutex> gurad(mymutex);
+            while(tasks.empty())
+            {
+                myCv.wait(gurad);
+            }
+            pTask = tasks.front();
+            tasks.pop_front();
+        }
+        if(pTask == NULL)
+            continue;
+        pTask->doTask();
+        delete pTask;
+        pTask = NULL;
+    }
+}
+
+void* producer_thread()
+{
+    int taskId = 0;
+    Task* pTask = NULL;
+    while(true)
+    {
+        pTask = new Task(taskId);
+        {
+            std::lock_guard<std::mutex> guard(mymutex);
+            tasks.push_back(pTask);
+            std::cout << "produce a task, taskId:" << taskId << ", threadId:"
+            <<std::this_thread::get_id() << std::endl;
+        }
+        myCv.notify_one();
+        taskId++;
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    return NULL;
+}
+
+int main()
+{
+    std::thread consumer1(consumer_thread);
+    std::thread consumer2(consumer_thread);
+    std::thread consumer3(consumer_thread);
+    std::thread consumer4(consumer_thread);
+    std::thread consumer5(consumer_thread);
+
+    std::thread producer(producer_thread);
+    producer.join();
+    consumer1.join();
+    consumer2.join();
+    consumer3.join();
+    consumer4.join();
+    consumer5.join();
+
+    return 0;
+}
+```
+
+## 3.9 多线程使用锁总结
+
+### 减少锁的使用次数
+
+使用锁会造成以下影响：
+
+- 加解锁本身有开销
+- 临界区代码不能并发执行
+- 线程竞争激烈的话会造成上下切换开销的消耗
+
+### 明确锁范围
+
+### 减少锁的使用粒度
+
+尽量减少锁作用的临界区代码范围。
+
+### 避免死锁
+
+- 加锁后需要在函数的每个出口都有解锁操作；
+- 线程退出时要及时释放其持有的锁
+- 多线程请求锁的方向要一致，如有锁A、B需要加锁，所有线程的加锁顺序要么都是先A后B，要么都是先B后A
+
+### 避免活锁
+
+- 避免让过多的线程使用trylock请求锁，以免出现活锁浪费资源
+
+## 3.10 线程局部存储(Thread Local Storage, TLS)
+
+### 3.10.1 [Windows 线程局部存储]((https://learn.microsoft.com/en-us/windows/win32/procthread/thread-local-storage))
+
+windows将线程局部存储区分为TLS_MINIMUM_AVAILABLE个块，默认为64，其定义在winnt.h中。
+
+> Thread local storage (TLS) enables multiple threads of the same process to use an index allocated by the **TlsAlloc** function to store and retrieve a value that is local to the thread. In this example, an index is allocated when the process starts. When each thread starts, it allocates a block of dynamic memory and stores a pointer to this memory in the TLS slot using the **TlsSetValue** function. The CommonFunc function uses the **TlsGetValue** function to access the data associated with the index that is local to the calling thread. Before each thread terminates, it releases its dynamic memory. Before the process terminates, it calls **TlsFree** to release the index.
+
+### 3.10.2 Linux的线程局部存储
+
+```C++
+__thread int g_mydata = 99;   //gcc编译器提供的用于定义线程局部变量的方式
+//因为进程中的所有线程都可以使用key，所以key应该指向一个全局变量
+int pthread_key_create(pthread_key_t *key, void (*destructor)(void*));
+int pthread_key_delete(pthread_key_t key);
+void *pthread_getspecific(pthread_key_t key);
+int pthread_setspecific(pthread_key_t key, const void *value);
+void* destructor(void* value)
+{
+  //多是为了释放value指针指向的资源
+}
+```
+
+### 3.10.3 C++11的thread_local关键字
+
+使用thread_local来定义一个线程变量。
+
+### 总结
+  
+- 对于线程变量，每个线程都有一个这个变量的拷贝，互不影响，在线程未结束前一直存在
+- 系统的线程局部存储区并不大，尽量不要使用这个空间存储大数据块，如不得不使用，可以将大数据块存储在堆内存中，再将堆内存的地址指针存储在TLS中。
+
+## 3.11 C库的非线程安全函数
+
+这种函数大多采用了全局变量或者静态变量
+
+## 3.12 线程池与队列系统设计
+
+## 3.13 纤程(Fiber)和协程(Routine)
+
+### 3.13.1 [纤程(Fiber)](https://learn.microsoft.com/en-us/windows/win32/procthread/fibers)
+
+纤程是Windows中的概念，使用线程有如下不足：
+
+- 由于线程的调度是由操作系统内核控制的，所以我们无法确定操作系统会何时运行或挂起该线程
+- 对于一些轻量级的任务，创建一个线程做的消耗太大
+
+在Windows中，一个线程可以有多个纤程，用户可以根据需要在各个纤程之间自由切换。**ConverThreadToFiber**可以将纤程切换成纤程模式，但在默认情况下x86系统的CPU浮点状态信息不属于CPU寄存器，不会为每个纤程都维护一份，因此如果在纤程中执行浮点操作就会导致数据被破坏，为了禁用这种行为可以使用**ConverThreadToFiberEx(, FIBER_FLAG_FLOAT_SWITCH)**。纤程也有自己的局部存储(FLS)。
+
+```C++
+#include<windows.h>
+#include<string>
+
+char g_szTime[64] = { "time not set..."};
+LPVOID mainWorkerFiber = NULL;
+LPVOID pWorkerFiber = NULL;
+
+void WINAPI workerFiberProc(LPVOID lpFiberParameter)
+{
+    while(true)
+    {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        wsprintfA(g_szTime, "%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth,
+        st.wDay, st.wHour, st.wMinute, st.wSecond);
+        printf("%s\n", g_szTime);
+
+        SwitchToFiber(mainWorkerFiber);
+    }
+}
+
+int main()
+{
+    mainWorkerFiber = ConvertThreadToFiber(NULL);
+    int index = 0;
+    while(index < 100)
+    {
+        ++index;
+        pWorkerFiber = CreateFiber(0, workerFiberProc, NULL);
+        if(pWorkerFiber == NULL)
+            return -1;
+        SwitchToFiber(pWorkerFiber);
+
+        memset(g_szTime, 0, sizeof(g_szTime));
+        strncpy(g_szTime, "time not set...", strlen("time not set..."));
+        printf("%s\n", g_szTime);
+        Sleep(1000);
+    }
+    DeleteFiber(pWorkerFiber);
+    ConvertFiberToThread();
+    return 0;
+}
+```
+
+### 3.13.2 协程
+
+线程是操作系统内核对象，线程过多时会导致上下文切换消耗太大，协程可以被认为是应用层模拟的线程，避免了线程上下文切换的部分额外损耗，同时具有并发运行的优点，降低了编写并发程序的复杂度。
+
+# 第四章 网络编程
+
+## 4.1 socket函数
+
+|函数|说明|
+|---|---|
+|socket|创建套接字|
+|bind|将socket绑定到IP和端口|
+|listen|让socket监听|
+|connect|建立TCP链接，一般用于客户端|
+|accept|尝试接收一个链接，用于服务端|
+|send|发送数据|
+|recv|接收数据|
+|select|判断一组socket上的读写和异常事件|
+|gethostbyname|通过域名获取机器地址|
+|close|关闭套接字|
+|shutdown|关闭socket收发通道|
+|setsocket|设置套接字选项|
+|getsocket|获取套接字选项|
+
+## 4.3 涉及跨平台网络通信库的socket函数用法
+
+### 4.3.1 socket数据类型
+
+```C++
+#ifdef WIN32
+typedef SOCKET SOCKET_TYPE
+#else
+typedef int SOCKET_TYPE
+#endif
+```
+
+### 4.3.2 windows上调用socket函数
+
+对于windows平台，想要使用socket函数，必须先调用WSAStartup函数将与socket函数相关的dll文件加载到进程地址空间，退出时使用WSACleanup函数卸载相关dll文件。WSAStartup和WSACleanup是进程相关的任何一个线程都可以调用，因此，一般在进程退出时才调用WSACleanup函数。
+
+```C++
+bool InitSocket()
+{
+  WORD wVersionRequested = MAKEWORD(2,2);
+  WSADATA wsaData;
+  int nErrorId = ::WSAStartup(wVersionRequested, &wsaData);
+  if(nErrorId != 0)
+    return false;
+  if(LOBYTE(wsaData.wVersion)!=2 || HIBYTE(wsaData.wVersion)!=2)
+  {
+    UninitSocket();
+    return false;
+  }
+  return true;
+}
+
+void UninitSocket()
+{
+  ::WSACleanup();
+}
+```
+
+### 关闭socket函数
+
+Linux中使用close，windows中使用closesocket函数，windows中也定了一个close函数，但不能用于关闭套接字，否则会导致程序崩溃。
+
+```C++
+#ifdef WIN32
+#define closesocket(s) close(s)
+#endif
+```
+
+### 获取socket函数的错误码
+
+在某个socket函数调用失败时，Windows需要调用WSAGetLastError()获取错误代码，Linux直接使用errno获取。
+
+```C++
+#ifdef WIN32
+#define GetSocketError() WSAGetLastError()
+#else
+#define GetSocketError() errno
+#endif
+```
+
+### 套接字函数返回值
+
+大多数socket函数在调用失败后会返回-1，windows为此定义了一个宏SOCKET_ERROR，为此在Linux上也可以定义一个：
+
+```C++
+#ifndef WIN32
+#define SOCKET_ERROR (-1)
+#endif
+```
+
+### 错误码WSAEWOULDBLOCK和EWOULDBLOCK
+
+```C++
+#ifdef WIN32
+#define EWOULDBLOCK WSAEWOULDBLOCK
+#endif
+```
+
+对于IO复用技术，两者都支持select模型，Linux特有的poll、epoll模型；windows特有的WSAPOOL和完成端口模型（IOCP）。
+
+## 4.4 bind函数
+
+### 4.4.1 bind函数如何选择绑定地址
+
+使用INADDR_ANY，底层的协议栈会自动选择一个合适的IP地址，在多网卡机器上选择IP地址会变得简单。相当于地址0.0.0.0。
+
+### 4.4.2 bind函数端口号问题
+
+端口号指定0系统会随机分配可用端口号，客户端的socket也可以调用bind函数绑定端口号。
+
+## 4.5 select函数
+
+### 4.5.1 Linux上的select函数
+
+select函数用于检测在一组socket中是否有事件就绪，返回值为0时代表超时，返回-1代表出错，若监视的事件中有任意一个事件发生，则返回值为就绪文件描述符数量，也就是说，即使只有一个文件描述符就绪，返回值也是 1，一般分如下三类：
+
+- 读事件就绪
+- 写事件就绪
+- 异常事件就绪
+
+```C++
+/* According to POSIX.1-2001, POSIX.1-2008 */
+#include <sys/select.h>
+
+/* According to earlier standards */
+#include <sys/time.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+int select(int nfds, fd_set *readfds, fd_set *writefds,
+          fd_set *exceptfds, struct timeval *timeout);
+
+void FD_CLR(int fd, fd_set *set);
+int  FD_ISSET(int fd, fd_set *set);
+void FD_SET(int fd, fd_set *set);
+void FD_ZERO(fd_set *set);
+
+#include <sys/select.h>
+
+int pselect(int nfds, fd_set *readfds, fd_set *writefds,
+            fd_set *exceptfds, const struct timespec *timeout,
+            const sigset_t *sigmask);
+```
+
+- nfds：所有需要使用select函数检测事件的fd中最大值加1
+- readfds:需要监听可读事件的fd集合
+
+> 在Linux上，向fd_set添加fd时用的是位图法，一个可以添加1024个fd。
+
+select用法示例：
+
+```C++
+//
+// Created by ljx on 23-2-22.
+//
+
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <iostream>
+#include <sys/time.h>
+#include <vector>
+#include <errno.h>
+#include <string.h>
+
+#define INVALID_FD -1
+
+int main()
+{
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if(listen_fd == INVALID_FD)
+    {
+        std::cout << "create listen_fd error." << std::endl;
+        return -1;
+    }
+
+    struct sockaddr_in bindAddr;
+    bindAddr.sin_family = AF_INET;
+    bindAddr.sin_addr.s_addr = htonl(INADDR_ANY);
+    bindAddr.sin_port = htons(3000);
+    if(bind(listen_fd, (struct sockaddr*)&bindAddr, sizeof(bindAddr)) == -1)
+    {
+        std::cout << "bind listen socket error." << std::endl;
+        close(listen_fd);
+        return -1;
+    }
+
+    if(listen(listen_fd, SOMAXCONN) == -1)
+    {
+        std::cout << "listen error." << std::endl;
+        close(listen_fd);
+        return -1;
+    }
+
+    std::vector<int> client_fds;
+    int maxfd;
+
+    while(true)
+    {
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(listen_fd, &readSet);
+        maxfd = listen_fd;
+
+        int clientFdsLength = client_fds.size();
+        for(int i = 0; i < clientFdsLength; ++i)
+        {
+            if(client_fds[i] != INVALID_FD)
+            {
+                FD_SET(client_fds[i], &readSet);
+                if(maxfd < client_fds[i])
+                    maxfd = client_fds[i];
+            }
+        }
+
+        timeval tm;
+        tm.tv_sec = 1;
+        tm.tv_usec = 0;
+        int ret = select(maxfd+1, &readSet, NULL, NULL, &tm);
+        if(ret == -1)
+        {
+            if(errno != EINTR)
+                break;
+        }
+        else if(ret == 0)
+        {
+            //select 函数超时
+            continue;
+        }
+        else
+        {
+            if(FD_ISSET(listen_fd, &readSet))
+            {
+                //如果是监听socket的可读事件，说明有新连接
+                struct sockaddr_in clientAddr;
+                socklen_t  clientAddrLen = sizeof(clientAddr);
+                int clientFd = accept(listen_fd, (struct  sockaddr*)&clientAddr, &clientAddrLen);
+                if(clientFd == INVALID_FD)
+                {
+                    break;
+                }
+                std::cout << "accept a client connection, fd:" << clientFd << std::endl;
+                client_fds.push_back(clientFd);
+            }
+            else
+            {
+                char recvBuf[64];
+                int clientFdsLength = client_fds.size();
+                for(int i = 0;i < clientFdsLength; ++i)
+                {
+                    if(client_fds[i] != INVALID_FD && FD_ISSET(client_fds[i], &readSet))
+                    {
+                        //如果其他socket的读事件则是客户端发来的消息
+                        memset(recvBuf, 0, sizeof(recvBuf));
+                        int length = recv(client_fds[i], recvBuf, 64, 0);
+                        //recv函数返回0说明对端关闭了连接
+                        if(length <= 0)
+                        {
+                            std::cout << "recv data error, clientfd:" << client_fds[i] << std::endl;
+                            close(client_fds[i]);
+                            client_fds[i] = INVALID_FD;
+                            continue;
+                        }
+                        std::cout << "clientfd: " << client_fds[i] << ", recv data:" << recvBuf << std::endl;
+                    }
+                }
+            }
+        }
+    }
+    int clientFdsLength = client_fds.size();
+    for(int i = 0; i < clientFdsLength; ++i)
+    {
+        if(client_fds[i] == INVALID_FD)
+        {
+            close(client_fds[i]);
+        }
+    }
+    close(listen_fd);
+    return 0;
+}
+```
+
+注意事项：
+
+- select函数在调用前后可能会修改readfds,writefds,exceptfds三个集合的内容，所以想要复用这三个变量时需要小心；
+- select函数也会修改timeval结构体的值，在Linux系统上是这样，Windows不会；
+- select函数的timeval结构体的两个字段如果都为0， 其行为时select检测相关集合中的fd，如果没有需要的事件则立即返回。如果这个值设置为NULL，select函数则会一直阻塞，知道满足要求的事件触发；
+- 在Linux上，select函数的第一个参数必须是待检测事件中最大的fd加1，在Windows上第一个参数传入任意值都可以，本身并不使用这个值
+
+缺点：
+
+- 每次调用select函数，都需要把fd集合从用户态复制到内核态并且在内核态中遍历传递进来的fd集合，这个开销在fd较多时很大；
+- 单个进程能够监视的文件描述符数量存在最大限制，Linux上一般为1024；
+- select函数在每次调用之前都要对传入的参数进行重新设定；
+- 在Linux上，select函数实现原理是其底层使用了poll函数
+
+## 4.6 socket的阻塞模式和非阻塞模式
+
+在阻塞和非阻塞模式下，具有不同行为表现的socket函数一般有connect,accept,send和recv。在Linux上还有write和read。默认创建的socket是阻塞模式的。
+
+### 设置非阻塞模式
+
+1. 创建时指定非阻塞（Linux)
+
+```C++
+int s = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, IPPROTO_TCP);
+```
+
+2. 使用ioctl或者fcntl
+
+```C++
+int oldSocketFlag = fcntl(sockfd, F_GETFL, 0);
+int newSocketFlag = oldSocketFlag | O_NONBLOCK;
+fcntl(sockfd, F_SETFL, newSocketFlag);
+```
+
+3. Linux上的accept4可以将返回的socket设置为非阻塞的
+
+```C++
+int clientFd = accept4(listenFd, &clientAddr, &clientAddrLen, SOCK_NONBLOCK);
+```
+
+4. 在windows上通过ioctlsocket函数将socket设置为非阻塞的
+
+```C++
+int ioctlsocket(SOCKET s, long cmd, u_long *argp);
+//cmd为FIONBIO， argp为0时阻塞，argp非0则为非阻塞
+```
+
+### 4.6.2 send和recv在阻塞和非阻塞模式下的表现
+
+send函数本质上不是像网络上发送数据，而是将应用层发送缓冲区的数据拷贝到内核缓冲区（TCP窗口），至于什么时候会从网卡缓冲区发送到网络要看TCP/IP协议栈的行为来确定，如果socket设置了TCP_NODELAY(禁用nagel算法)，存放到内核缓冲区的数据就会被立即发送。recv的行为类似。
+
+如果内核缓冲区被填满后会有以下表现；
+
+- 如果socket是阻塞模式，继续调用send/recv，程序会阻塞在send/recv处；
+- 如果是非阻塞模式，send/recv会立即出错并返回，会得到一个相关错误码，Linux上为EWOULDBLOCK或EAGAIN，Windows上为WSAEWOULDBLOCK。
+
+### 4.6.3 send/recv小结
+
+非阻塞模式下返回值总结
+
+|返回值n|含义|
+|---|---|
+|>0|成功发送/接受n字节，并不代表数据全部发送，有可能只发送了部分|
+|=0|对端关闭连接，或者主动发送了0字节的数据|
+|-1|出错/信号中断/缓冲区满/空|
+
+返回-1时的情况
+
+|错误码|send函数|recv函数|操作系统|
+|---|---|---|---|
+|EWOULDBLOCK/EAGAIN|TCP窗口太小，数据暂时无法发送|当前内核缓冲区无可读数据|Linux|
+|EINTR|信号中断|信号中断|Linux|
+|非以上|出错|出错|Linux|
+|WSAEWOULDBLOCK|TCP窗口太小，数据暂时无法发送|当前内核缓冲区无可读数据|Windows|
+|不是WSAEWOULDBLOCK|出错|出错|Windows|
+
+**使用场景**
+
+非阻塞模式一般用于需要支持高并发多QPS的场景（如服务器程序），阻塞模式逻辑简单，程序明了。阻塞模式可用于下面的场景：
+
+简单的网络应用：对于简单的网络应用，如传输小型文件或消息，阻塞模式的 socket 可以满足需求，因为这些操作不需要长时间的等待和处理，而且相对于非阻塞模式的 socket，阻塞模式更加易于使用和实现。
+
+小规模网络应用：对于小规模的网络应用，阻塞模式的 socket 可以提供足够的性能和可靠性。此外，阻塞模式也更容易实现和调试。
+
+低负载网络：对于低负载的网络，阻塞模式的 socket 可以提供良好的性能和可靠性。例如，对于个人电脑或小型服务器，阻塞模式的 socket 可以满足需求，因为它们通常不需要处理大量的并发连接或高速数据传输。
+
+传输较小数据量：对于传输较小数据量的网络应用，阻塞模式的 socket 可以比非阻塞模式的 socket 更加高效。这是因为在阻塞模式下，数据可以一次性传输完毕，而非阻塞模式下需要多次传输，增加了额外的开销。
+
+总之，阻塞模式的 socket 适用于简单、小规模、低负载、传输较小数据量的网络应用，它更加易于使用和实现，但是在高并发、高速传输和大数据量传输等场景下，可能会影响网络应用的性能和可靠性。
+
+### 主动发送0字节数据的情况
+
+send函数发送0字节的数据时，操作系统协议栈并不会把这些数据发送出去，因此server端的recv函数不会接收到这个0字节的数据包。开发时应该避免写出可能调用send函数发送0字节的代码。
+
+## 4.8 connect函数在阻塞和非阻塞模式下的行为
+
+一般步骤：
+
+- 创建socket，设置非阻塞模式
+- 调用connect函数，此时，无论是否连接成功都会立即返回，如果返回-1，并且错误码是EINPROGRASS则表示正在尝试连接
+- 调用select函数，在指定时间内判断该socket是否可写，如果可写则说明连接成功，否则认为连接失败
+
+**在Linux上，一个socket没有建立连接之前用select函数检测也会得到可写的结果。因此需要调用getsocketopt检测socket是否出错，并通过错误码检测socket是否连接上。Windows上不会出现此问题**
+
+## 4.9 连接时顺便接受第一组数据
+
+Linux提供了TCP_DEFER_ACCEPT的socket选项，设置该选项之后只有连接成功且接收到第一组对端数据时accept才返回。Windows则可以通过[AcceptEx](https://learn.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-acceptex)函数来设置。
+
+发送时同样可以设置是否顺便发送第一组数据。Windows通过ConnectEx函数设置，
+
+## 4.10 获取当前socket对应的接受缓存区中的可读数据量
+
+### 函数
+
+Windows提供了[ioctlsocket](https://learn.microsoft.com/en-us/windows/win32/api/winsock/nf-winsock-ioctlsocket)这个函数，cmd设置为FIONREAD即可，argp存储操作结果。Linux可以使用ioctl函数，用法基本相同。但是Linux的第三个参数必须初始化为0才能得到正确的结果。
+
+## 4.12 Linux SIGPIPE信号
+
+当A关闭连接时，若B继续向A发送数据，根据TCP的规定，B会收到一个RST报文应答，若B继续向这个服务发送数据，系统就会产生一个SIGPIPE信号给B进程，**并且系统对SIGPIPE信号的默认处理方式是结束进程。** 为了避免这个信号对程序产生影响，可以忽略该信号；
+
+```C++
+signal(SIGPIPE, SIG_IGN)
+```
+
+这样设置后，第二次调用write/send方法时会返回-1，同时errno错误码被置为EPIPE。
+
+## 4.13 Linux poll函数
+
+poll函数用于检测一组文件描述符上的可读可写和出错事件：
+
+```C++
+#include <poll.h>
+int poll(struct pollfd *fds, nfds_t nfds, int timeout);
+
+struct pollfd {
+    int   fd;         /* file descriptor */
+    short events;     /* requested events */
+    short revents;    /* returned events */
+};
+```
+
+优点：
+
+- poll不要求计算最大fd+1
+- 与select相比，poll在处理大数量文件描述符时速度更快
+- poll没有最大连接数的限制
+- 调用poll时，只需对参数进行一次设置
+
+缺点：
+
+- 在调用epoll时，不管有没有意义，大量fd的数组在用户态和内核地址空间之间被整体复制
+- 与select一样，poll返回后需要遍历集合fd来获取就绪的fd
+- 同时连接的大量客户端在某一时刻可能只有很少的就绪态，因此随着监视描述符数量增长，其效率也会线性下降
+
+## 4.14 epoll模型
+
+epoll 是一种高效的 I/O 多路复用机制，它比传统的 select 和 poll 函数更加灵活和高效。epoll 主要包括三个函数：
+
+int epoll_create(int size)：用于创建一个 epoll 对象，size 参数指定 epoll 可以监视的文件描述符的最大数量，但实际上这个值并不是一个硬性限制。
+
+int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)：用于向 epoll 中添加或修改或删除一个文件描述符，epfd 参数是 epoll 对象的文件描述符，op 参数是操作类型，可以是 EPOLL_CTL_ADD、EPOLL_CTL_MOD 或 EPOLL_CTL_DEL，分别用于添加、修改和删除文件描述符，fd 参数是需要添加、修改或删除的文件描述符，event 参数是一个指向 epoll_event 结构体的指针，用于指定事件类型和其他参数。
+
+int epoll_wait(int epfd, struct epoll_event *events, int maxevents, int timeout)：用于等待 epoll 监视的文件描述符上发生事件，epfd 参数是 epoll 对象的文件描述符，events 参数是一个指向 epoll_event 数组的指针，用于存储发生事件的文件描述符和事件类型，maxevents 参数指定 events 数组的最大大小，timeout 参数指定等待时间的毫秒数，如果 timeout 参数为 -1，则表示等待时间无限长。
+
+```C++
+#include <sys/epoll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#define MAX_EVENTS 10
+
+int main() {
+    int epfd, nfds;
+    struct epoll_event event, events[MAX_EVENTS];
+
+    // 创建 epoll 对象
+    epfd = epoll_create(1);
+    if (epfd == -1) {
+        perror("epoll_create");
+        exit(EXIT_FAILURE);
+    }
+
+    // 监视 stdin 文件描述符上是否有数据可读
+    event.data.fd = STDIN_FILENO;
+    event.events = EPOLLIN;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, STDIN_FILENO, &event) == -1) {
+        perror("epoll_ctl");
+        exit(EXIT_FAILURE);
+    }
+
+    while (1) {
+        // 等待事件
+        nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        if (nfds == -1) {
+            perror("epoll_wait");
+            exit(EXIT_FAILURE);
+        }
+
+        // 处理事件
+        for (int i = 0; i < nfds; i++) {
+            if (events[i].data.fd == STDIN_FILENO) {
+                printf("stdin is readable\n");
+            }
+        }
+    }
+
+    return 0;
+}
+```
+
+优点：
+
+- epoll_wait调用完成后，可通过参数event拿到所有的有事件就绪的fd
+- 在socket连接数量较大而活跃的连接较少时，epoll模型更高效
 
